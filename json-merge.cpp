@@ -114,21 +114,25 @@ int main(
 		}
 	}
 	
-	assert(argc - optind >= 3);	
+	assert(argc - optind >= 2);
 
-	auto init_stream = ifstream(argv[optind++], ifstream::in);
-	auto merge_stream = ifstream(argv[optind++], ifstream::in);
-	auto dst_stream = ofstream(argv[optind++], ifstream::out);
+	auto ancestor_stream = ifstream(argv[optind], fstream::in);
+	auto merge_stream = ifstream(argv[optind + 1], fstream::in);
+	auto buffer_stream = ostringstream();
+	ofstream output_stream;
 
-	assert(init_stream);
+	assert(ancestor_stream);
 	assert(merge_stream);
-	assert(dst_stream);
 
-	merge_json_streams(strategy, init_stream, merge_stream, dst_stream);
+	merge_json_streams(strategy, ancestor_stream, merge_stream, buffer_stream);
 
-	init_stream.close();
+	output_stream.open(argv[optind], ofstream::out);
+	assert(output_stream.is_open());
+	output_stream << buffer_stream.str();
+
+	ancestor_stream.close();
 	merge_stream.close();
-	dst_stream.close();
+	output_stream.close();
 
 	return 0;
 }
