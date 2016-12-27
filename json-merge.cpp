@@ -107,6 +107,7 @@ int main(
 					cerr << "Unknown strategy " << optarg << endl;
 					abort();
 				}
+				break;
 			case -1:
 				break;
 			default:
