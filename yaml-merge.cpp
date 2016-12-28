@@ -1,138 +1,235 @@
 #include <iostream>
+#include <string>
 #include <fstream>
-#include <string.h>
+#include <cassert>
 #include <yaml.h>
-#include <getopt.h>
 
 using namespace std;
 
-enum MERGE_STRATEGY {
-	THEIRS,
-	OURS
-};
-
 void
-merge_yaml_nodes(
-	MERGE_STRATEGY strategy,
-	YAML::Node *current_yaml,
-	YAML::Node *merge_yaml)
+replace_substring(
+	string str,
+	const string& pattern,
+	const string& replace)
 {
-	if (current_yaml->Type() != merge_yaml->Type()
-	    || current_yaml->Type() == YAML::NodeType::Undefined
-	    || current_yaml->Type() == YAML::NodeType::Null
-	    || current_yaml->Type() == YAML::NodeType::Scalar)
+	assert(not pattern.empty());
+
+	for (
+		size_t pos = str.find(pattern);
+		pos != string::npos;
+		str.replace(pos, pattern.size(), replace),
+		pos = str.find(pattern, pos + replace.size())
+	);
+}
+
+string
+escape_string_path(
+	string str)
+{
+	replace_substring(str, "~", "~0");
+	replace_substring(str, "/", "~1");
+	return str;
+}
+
+bool
+compare_nodes(
+	const YAML::Node& node1,
+	const YAML::Node& node2)
+{
+	if (node1.is(node2))
+		return true;
+
+	if (node1.Type() != node2.Type())
+		return false;
+
+	switch(node1.Type())
 	{
-		if (strategy == MERGE_STRATEGY::THEIRS)
-		{
-			*current_yaml = YAML::Node(*merge_yaml);
-		}
-		return;
+		case YAML::NodeType::Map:
+		case YAML::NodeType::Sequence:
+		case YAML::NodeType::Undefined:
+			return false;
+		case YAML::NodeType::Null:
+			return true;
+		case YAML::NodeType::Scalar:
+			return node1.as<string>().compare(node2.as<string>()) == 0;
 	}
+}
 
-	if (current_yaml->Type() == YAML::NodeType::Map)
+YAML::Node
+diff(
+	const YAML::Node& source,
+	const YAML::Node& target,
+	const string& path = "")
+{
+	YAML::Node result = YAML::Load("[]");
+	
+	if (compare_nodes(source, target))
 	{
-		for (YAML::const_iterator it = merge_yaml->begin(); it != merge_yaml->end(); it++)
+		return result;
+	}
+	else if (source.Type() == YAML::NodeType::Map && target.Type() == YAML::NodeType::Map)
+	{
+		// First, look at existing key in target object.
+		//   - if key found, recursively call diff function.
+		//   - if key NOT found, add remove instruction in result array.
+		for (YAML::const_iterator it = source.begin(); it != source.end(); it++)
 		{
-			string key = it->first.as<string>();
 			YAML::Node value = it->second;
-			YAML::Node item = (*current_yaml)[key];
+			string key = it->first.as<string>();
+			string esc_key = escape_string_path(key);
 
-			if (item.Type() == YAML::NodeType::Undefined)
+			// Key not found in target .. remove it
+			if (!target[key])
 			{
-				(*current_yaml)[key] = YAML::Node(value);
+				YAML::Node item;
+				item["op"] = "remove";
+				item["path"] = path + "/" + esc_key;
+				result.push_back(item);
 			}
 			else
 			{
-				merge_yaml_nodes(strategy, &item, &value); 
+				YAML::Node rec_result = diff(value, target[key], path + "/" + esc_key);
+				for (YAML::const_iterator rec_it = rec_result.begin(); rec_it != rec_result.end(); rec_it++)
+				{
+					result.push_back(*rec_it);
+				}
 			}
 		}
-	}
-	else if (current_yaml->Type() == YAML::NodeType::Sequence)
-	{
-		for (YAML::const_iterator it = merge_yaml->begin(); it != merge_yaml->end(); it++)
+
+		// Walk target object to add new keys in result array
+		for (YAML::const_iterator it = target.begin(); it != target.end(); it++)
 		{
-			current_yaml->push_back(YAML::Node(*it));
+			YAML::Node value = it->second;
+			string key = it->first.as<string>();
+			string esc_key = escape_string_path(key);
+
+			if (!source[key])
+			{
+				YAML::Node item;
+				item["op"] = "add";
+				item["path"] = path + "/" + esc_key;
+				item["value"] = value;
+				result.push_back(item);
+			}
+		}
+		
+	}
+	else if (source.Type() == YAML::NodeType::Sequence && target.Type() == YAML::NodeType::Sequence)
+	{
+		size_t i = 0;
+		while (i < source.size() && i < target.size())
+		{
+			YAML::Node rec_result = diff(source[i], target[i], path + "/" + to_string(i));
+			for (YAML::const_iterator rec_it = rec_result.begin(); rec_it != rec_result.end(); rec_it++)
+			{
+				result.push_back(*rec_it);
+			}
+			i++;
+		}
+
+		while (i < target.size())
+		{
+			YAML::Node item;
+			item["op"] = "add";
+			item["path"] = path + "/" + to_string(i);
+			item["value"] = target[i];
+			result.push_back(item);
+			i++;
 		}
 	}
+	else
+	{
+		YAML::Node item;
+		item["op"] = "replace";
+		item["path"] = path;
+		item["value"] = target;		
+		result.push_back(item);
+	}
+
+	return result;
 }
 
 void
-merge_yaml_streams(
-	MERGE_STRATEGY strategy,
-	istream& current_stream,
-	istream& merge_stream,
-	ostream& output_stream)
+merge(
+	istream& our_stream,
+	istream& older_stream,
+	istream& their_stream,
+	ostream& dst_stream)
 {
-	auto current_yaml = YAML::Load(current_stream);
-	auto merge_yaml = YAML::Load(merge_stream);
-
-	merge_yaml_nodes(strategy, &current_yaml, &merge_yaml);
-
-	YAML::Emitter out;
-	out.SetIndent(4);
-	out.SetOutputCharset(YAML::EscapeNonAscii);
-	out << current_yaml;
-	output_stream << out.c_str();
+	auto our = YAML::Load(our_stream);
+	auto older = YAML::Load(older_stream);
+	auto their = YAML::Load(their_stream);
+	//dst_stream << our.patch(json::diff(older, their)).dump(4);
+	cout << diff(older, their);
+	exit(0);
 }
 
-static struct option long_options[] =
+void
+usage(char *program)
 {
-	{ "strategy", required_argument, 0, 's' }
-};
+	cerr << "Usage: " << program << " <current> <older> <other>" << endl;
+}
 
 int main(
 	int argc,
 	char *argv[])
 {
-	MERGE_STRATEGY strategy = MERGE_STRATEGY::THEIRS;
-	char c = 0;
-	while (c != -1)
+	// Validate number of arguments or show usage.
+	if (argc < 4)
 	{
-		int option_index = 0;
-		c = getopt_long(argc, argv, "s:", long_options, &option_index);
+		cerr << "Too few arguments" << endl;
+		usage(argv[0]);
+		exit(1); 
+	}
 
-		switch (c)
-		{
-			case 's':
-				if (strcasecmp(optarg, "theirs") == 0)
-				{
-					strategy = MERGE_STRATEGY::THEIRS;
-				}
-				else if (strcasecmp(optarg, "ours") == 0)
-				{
-					strategy = MERGE_STRATEGY::OURS;
-				}
-				else
-				{
-					cerr << "Unknown strategy " << optarg << endl;
-					abort();
-				}
-				break;
-			case -1:
-				break;
-			default:
-				abort();
-		}
+	// 3 input streams, 1 buffer and 1 output stream
+	ifstream our_stream;
+	ifstream older_stream;
+	ifstream their_stream;
+	ofstream output_stream;
+	ostringstream buffer_stream;
+
+	buffer_stream = ostringstream();
+
+	our_stream.open(argv[1]);
+	if (!our_stream.is_open())
+	{
+		cerr << "Cannot open current file " << argv[1] << endl;
+		exit(1);
+	}
+
+	older_stream.open(argv[2], fstream::in);
+	if (!older_stream.is_open())
+	{
+		cerr << "Cannot open older file " << argv[2] << endl;
+		exit(1);
+	}
+
+	their_stream.open(argv[3], fstream::in);
+	if (!their_stream.is_open())
+	{
+		cerr << "Cannot open other file " << argv[3] << endl;
+		exit(1);
 	}
 	
-	assert(argc - optind >= 2);
+	// Parse and merge JSON streams
+	merge(our_stream, older_stream, their_stream, buffer_stream);
 
-	auto ancestor_stream = ifstream(argv[optind], fstream::in);
-	auto merge_stream = ifstream(argv[optind + 1], fstream::in);
-	auto buffer_stream = ostringstream();
-	ofstream output_stream;
+	// Close input streams
+	our_stream.close();
+	older_stream.close();
+	their_stream.close();
 
-	assert(ancestor_stream);
-	assert(merge_stream);
-
-	merge_yaml_streams(strategy, ancestor_stream, merge_stream, buffer_stream);
-
-	output_stream.open(argv[optind], ofstream::out);
-	assert(output_stream.is_open());
+	// (Re)open our stream in output and dump buffer
+	output_stream.open(argv[1], ofstream::out);
+	if (!output_stream.is_open())
+	{
+		cerr << "Cannot open output file " << argv[1] << endl;
+		exit(1);
+	} 
 	output_stream << buffer_stream.str();
 
-	ancestor_stream.close();
-	merge_stream.close();
+	// Close output stream
 	output_stream.close();
 
 	return 0;
