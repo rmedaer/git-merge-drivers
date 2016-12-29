@@ -1,5 +1,7 @@
 #include <iostream>
 #include <string>
+#include <algorithm>
+#include <vector>
 #include <fstream>
 #include <cassert>
 #include <yaml.h>
@@ -62,7 +64,7 @@ diff(
 	const string& path = "")
 {
 	YAML::Node result = YAML::Load("[]");
-	
+
 	if (compare_nodes(source, target))
 	{
 		return result;
@@ -112,7 +114,6 @@ diff(
 				result.push_back(item);
 			}
 		}
-		
 	}
 	else if (source.Type() == YAML::NodeType::Sequence && target.Type() == YAML::NodeType::Sequence)
 	{
@@ -142,11 +143,85 @@ diff(
 		YAML::Node item;
 		item["op"] = "replace";
 		item["path"] = path;
-		item["value"] = target;		
+		item["value"] = target;
 		result.push_back(item);
 	}
 
 	return result;
+}
+
+bool
+is_number(
+	const string& str)
+{
+	return find_if(
+	    str.begin(),
+	    str.end(),
+	    [](char c) { return !isdigit(c); }) == str.end();
+}
+
+YAML::Node
+patch(
+	YAML::Node& origin,
+	const YAML::Node& patches)
+{
+	assert(patches.IsSequence());
+
+	for (size_t i = 0; i < patches.size(); i++)
+	{
+		YAML::Node patch = patches[i];
+		assert(patch["op"]);
+		assert(patch["path"]);
+
+		string op = patch["op"].as<string>();
+		string path = patch["path"].as<string>();
+
+		vector<YAML::Node> tree = { origin };
+
+		string part;
+		stringstream ss;
+
+		// Create string stream from patch path
+		ss.str(path);
+
+		// Walk through each part of the path
+		while (getline(ss, part, '/'))
+		{
+			if (part.empty())
+				continue;
+
+			YAML::Node next;
+			if (is_number(part))
+				next = tree.back()[stoi(part)];
+			else
+				next = tree.back()[part];
+
+			tree.push_back(next);
+		}
+
+		if (op.compare("add") == 0 || op.compare("replace") == 0)
+		{
+			tree.back() = patch["value"];
+		}
+		else if (op.compare("remove") == 0)
+		{
+			tree.at(tree.size() - 2).remove(part);
+		}
+		else if (op.compare("move") == 0)
+		{
+			throw "Not implemented";
+		}
+		else if (op.compare("copy") == 0)
+		{
+			throw "Not implemented";
+		}
+		else if (op.compare("test") == 0)
+		{
+			throw "Not implemented";
+		}
+	}
+
+	return origin;
 }
 
 void
@@ -159,9 +234,8 @@ merge(
 	auto our = YAML::Load(our_stream);
 	auto older = YAML::Load(older_stream);
 	auto their = YAML::Load(their_stream);
-	//dst_stream << our.patch(json::diff(older, their)).dump(4);
-	cout << diff(older, their);
-	exit(0);
+
+	dst_stream << patch(our, diff(older, their));
 }
 
 void
@@ -211,7 +285,7 @@ int main(
 		cerr << "Cannot open other file " << argv[3] << endl;
 		exit(1);
 	}
-	
+
 	// Parse and merge JSON streams
 	merge(our_stream, older_stream, their_stream, buffer_stream);
 
